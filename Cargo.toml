@@ -1,0 +1,16 @@
+[package]
+name = "zuqe_zapi_macros"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural macros for zuqe_zapi: #[zq_function] and #[zq_module]."
+authors = ["John Ray <996351336@qq.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/nupha/zapi"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
