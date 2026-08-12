@@ -224,15 +224,15 @@ fn expand_function(
         ) -> ::zuqe_zapi::__private::ZqRawValue {
             let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
             let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-            let __result = #impl_fn(__cx, __cc);
-            match __result {
-                Ok(__v) => {
-                    unsafe { (*__info).ret = __v.raw() };
-                    0
-                }
-                Err(_) => {
-                    unsafe { (*__info).threw = 1 };
-                    0
+            // The result IS the return value; on error return the exception
+            // sentinel (optionally carrying the thrown JS value in `thrown`).
+            match #impl_fn(__cx, __cc) {
+                Ok(__v) => __v.raw(),
+                Err(__e) => {
+                    if let Some(__ex) = __e.exception() {
+                        unsafe { (*__info).thrown = __ex };
+                    }
+                    ::zuqe_zapi::__private::exception_value()
                 }
             }
         }
@@ -472,7 +472,7 @@ fn expand_module(
             __info: *mut ::zuqe_zapi::ffi::ZqModuleInfo,
         ) {
             assert!(!__api.is_null() && !__info.is_null());
-            unsafe { ::zuqe_zapi::__private::init_api(__api as *const _) };
+            unsafe { ::zuqe_zapi::__private::zapi_init(__api as *const _) };
 
             // Materialize the exports into a leaked slice that stays valid for
             // the process lifetime (the library is dlopen'd once and kept alive
@@ -813,15 +813,13 @@ fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
             ) -> ::zuqe_zapi::__private::ZqRawValue {
                 let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
                 let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-                let __result = #ty::constructor(__cx, __cc);
-                match __result {
-                    Ok(__v) => {
-                        unsafe { (*__info).ret = __v.raw() };
-                        0
-                    }
-                    Err(_) => {
-                        unsafe { (*__info).threw = 1 };
-                        0
+                match #ty::constructor(__cx, __cc) {
+                    Ok(__v) => __v.raw(),
+                    Err(__e) => {
+                        if let Some(__ex) = __e.exception() {
+                            unsafe { (*__info).thrown = __ex };
+                        }
+                        ::zuqe_zapi::__private::exception_value()
                     }
                 }
             }
@@ -849,15 +847,13 @@ fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
                 ) -> ::zuqe_zapi::__private::ZqRawValue {
                     let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
                     let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-                    let __result = #ty::#ident(__cx, __cc);
-                    match __result {
-                        Ok(__v) => {
-                            unsafe { (*__info).ret = __v.raw() };
-                            0
-                        }
-                        Err(_) => {
-                            unsafe { (*__info).threw = 1 };
-                            0
+                    match #ty::#ident(__cx, __cc) {
+                        Ok(__v) => __v.raw(),
+                        Err(__e) => {
+                            if let Some(__ex) = __e.exception() {
+                                unsafe { (*__info).thrown = __ex };
+                            }
+                            ::zuqe_zapi::__private::exception_value()
                         }
                     }
                 }
