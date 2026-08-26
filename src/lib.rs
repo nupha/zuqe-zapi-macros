@@ -229,9 +229,8 @@ fn expand_function(
             match #impl_fn(__cx, __cc) {
                 Ok(__v) => __v.raw(),
                 Err(__e) => {
-                    if let Some(__ex) = __e.exception() {
-                        unsafe { (*__info).thrown = __ex };
-                    }
+                    let __ex = __e.exception().unwrap_or_else(|| __cx.throw_error(&__e));
+                    unsafe { (*__info).thrown = __ex };
                     ::zuqe_zapi::__private::exception_value()
                 }
             }
@@ -816,9 +815,8 @@ fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
                 match #ty::constructor(__cx, __cc) {
                     Ok(__v) => __v.raw(),
                     Err(__e) => {
-                        if let Some(__ex) = __e.exception() {
-                            unsafe { (*__info).thrown = __ex };
-                        }
+                        let __ex = __e.exception().unwrap_or_else(|| __cx.throw_error(&__e));
+                        unsafe { (*__info).thrown = __ex };
                         ::zuqe_zapi::__private::exception_value()
                     }
                 }
@@ -850,9 +848,8 @@ fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
                     match #ty::#ident(__cx, __cc) {
                         Ok(__v) => __v.raw(),
                         Err(__e) => {
-                            if let Some(__ex) = __e.exception() {
-                                unsafe { (*__info).thrown = __ex };
-                            }
+                            let __ex = __e.exception().unwrap_or_else(|| __cx.throw_error(&__e));
+                            unsafe { (*__info).thrown = __ex };
                             ::zuqe_zapi::__private::exception_value()
                         }
                     }
