@@ -472,6 +472,8 @@ fn expand_module(
         ) {
             assert!(!__api.is_null() && !__info.is_null());
             unsafe { ::zuqe_zapi::__private::zapi_init(__api as *const _) };
+            // Stash the host-provided dylib path (see `zuqe_zapi::module_path`).
+            unsafe { ::zuqe_zapi::__private::path_init((*__info).path) };
 
             // Materialize the exports into a leaked slice that stays valid for
             // the process lifetime (the library is dlopen'd once and kept alive
