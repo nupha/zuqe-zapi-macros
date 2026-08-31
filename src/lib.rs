@@ -15,10 +15,10 @@ use syn::{
 ///
 /// The signature must be:
 /// ```ignore
-/// fn name(cx: ZqCtx, cc: ZqCallInfo) -> Result<ZqValue<'_>, ZqError>
+/// fn name(ctx: ZqCtx, cc: ZqCallInfo) -> Result<ZqValue<'_>, ZqError>
 /// ```
 ///
-/// - `cx: ZqCtx` — callback context (by value, Copy).
+/// - `ctx: ZqCtx` — callback context (by value, Copy).
 /// - `cc: ZqCallInfo` — provides `this()`, `len()`, `arg()`, `arg_as()`.
 /// - Returns `Result<ZqValue<'_>, ZqError>` — the JS return value or error.
 ///
@@ -39,7 +39,7 @@ pub fn zq_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The signature must be:
 /// ```ignore
-/// fn name(cx: ZqCtx) -> Result<ZqValue<'_>, ZqError>
+/// fn name(ctx: ZqCtx) -> Result<ZqValue<'_>, ZqError>
 /// ```
 ///
 /// The value is built at module-evaluation time with a real `ZqEnv`, so it can
@@ -66,7 +66,7 @@ pub fn zq_export(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The annotated function is ALWAYS the module init hook (any name works; the
 /// standard is `module_init`), always registered — the host runs it once at
 /// evaluation time with a real `ZqEnv`. Two signature forms:
-/// `fn module_init(cx: &ZqCtx) -> Result<(), ZqError>` for real init logic, or
+/// `fn module_init(ctx: &ZqCtx) -> Result<(), ZqError>` for real init logic, or
 /// an empty `fn module_init() {}` for a registered no-op init.
 #[proc_macro_attribute]
 pub fn zq_module(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -164,12 +164,12 @@ pub fn derive_gc_trace(input: TokenStream) -> TokenStream {
     let traces = fields.iter().map(|f| {
         let name = f.ident.as_ref().expect("ZqGcTrace requires named fields");
         quote! {
-            ::zuqe_zapi::ZqGcTrace::trace(&self.#name, ctx);
+            ::zuqe_zapi::ZqGcTrace::trace(&self.#name, gcx);
         }
     });
     (quote! {
         impl ::zuqe_zapi::ZqGcTrace for #ident {
-            fn trace(&self, ctx: &mut ::zuqe_zapi::ZqGcTraceCtx) {
+            fn trace(&self, gcx: &mut ::zuqe_zapi::ZqGcTraceCtx) {
                 #(#traces)*
             }
         }
@@ -273,7 +273,7 @@ fn expand_export(
     let fn_name = func.sig.ident.clone();
     let js_name = func_arg_name(&args)?.unwrap_or_else(|| fn_name.to_string());
 
-    // Validate signature: 1 param (cx), returns Result<ZqValue, ZqError>.
+    // Validate signature: 1 param (ctx), returns Result<ZqValue, ZqError>.
     if func.sig.inputs.len() != 1 {
         return Err(Error::new_spanned(
             &func.sig,
@@ -356,27 +356,35 @@ fn parse_path_list(expr: &Expr) -> syn::Result<Vec<Path>> {
 }
 
 fn parse_module_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ModuleArgs> {
-    let mut out = ModuleArgs { name: None, exports: Vec::new(), exports_named: None };
+    let mut out = ModuleArgs {
+        name: None,
+        exports: Vec::new(),
+        exports_named: None,
+    };
     for meta in args {
         match meta {
             Meta::NameValue(nv) if nv.path.is_ident("name") => {
-                let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value else {
-                    return Err(Error::new_spanned(&nv.value, "`name` must be a string literal"));
+                let Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) = &nv.value
+                else {
+                    return Err(Error::new_spanned(
+                        &nv.value,
+                        "`name` must be a string literal",
+                    ));
                 };
                 out.name = Some(s.value());
             }
-            Meta::NameValue(nv) if nv.path.is_ident("exports") => {
-                match &nv.value {
-                    Expr::Array(_) => out.exports = parse_path_list(&nv.value)?,
-                    Expr::Path(p) => out.exports_named = Some(p.path.clone()),
-                    other => {
-                        return Err(Error::new_spanned(
-                            other,
-                            "`exports` must be a `[item, ..]` list or a path to a `[ZqFieldDef; _]` const",
-                        ));
-                    }
+            Meta::NameValue(nv) if nv.path.is_ident("exports") => match &nv.value {
+                Expr::Array(_) => out.exports = parse_path_list(&nv.value)?,
+                Expr::Path(p) => out.exports_named = Some(p.path.clone()),
+                other => {
+                    return Err(Error::new_spanned(
+                        other,
+                        "`exports` must be a `[item, ..]` list or a path to a `[ZqFieldDef; _]` const",
+                    ));
                 }
-            }
+            },
             other => {
                 return Err(Error::new_spanned(other, "expected `name` or `exports`"));
             }
@@ -394,7 +402,7 @@ fn expand_module(
 
     // The annotated function is ALWAYS the module init hook (any name; standard
     // is `module_init`), always registered. Two signature forms:
-    //   - `fn module_init(cx: &ZqCtx) -> Result<(), ZqError>` — real init logic;
+    //   - `fn module_init(ctx: &ZqCtx) -> Result<(), ZqError>` — real init logic;
     //   - `fn module_init() {}` — empty init (registered, runs once, no-op).
     let init_takes_cx = match func.sig.inputs.len() {
         0 => false,
@@ -487,9 +495,8 @@ fn expand_module(
                 (*__info).exports_len = __exports.len();
                 (*__info).init = #init_expr;
                 (*__info).struct_size =
-                    ::zuqe_zapi::__private::size_of::<::zuqe_zapi::__private::ZqModuleInfo>() as u32;
-                (*__info).abi_version = ::zuqe_zapi::__private::ZQ_ABI_VERSION;
-                (*__info).min_api_version = ::zuqe_zapi::__private::ZQ_API_VERSION;
+                    ::std::mem::size_of::<::zuqe_zapi::__private::ZqModuleInfo>() as u32;
+                (*__info).version = ::zuqe_zapi::__private::ZQ_VERSION_PACKED;
             }
         }
     })
@@ -510,18 +517,31 @@ struct ClassArgs {
 }
 
 fn parse_class_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ClassArgs> {
-    let mut out = ClassArgs { name: None, payload: None, payload_no_gc: false };
+    let mut out = ClassArgs {
+        name: None,
+        payload: None,
+        payload_no_gc: false,
+    };
     for meta in args {
         match meta {
             Meta::NameValue(nv) if nv.path.is_ident("name") => {
-                let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value else {
-                    return Err(Error::new_spanned(&nv.value, "`name` must be a string literal"));
+                let Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) = &nv.value
+                else {
+                    return Err(Error::new_spanned(
+                        &nv.value,
+                        "`name` must be a string literal",
+                    ));
                 };
                 out.name = Some(s.value());
             }
             Meta::NameValue(nv) if nv.path.is_ident("payload") => {
                 let Expr::Path(p) = &nv.value else {
-                    return Err(Error::new_spanned(&nv.value, "`payload` must be a type path"));
+                    return Err(Error::new_spanned(
+                        &nv.value,
+                        "`payload` must be a type path",
+                    ));
                 };
                 out.payload = Some(p.path.clone());
             }
@@ -575,17 +595,17 @@ fn expand_class(
                     return;
                 }
                 let payload = unsafe { &*(opaque as *const #payload) };
-                let mut ctx = unsafe { ::zuqe_zapi::ZqGcTraceCtx::from_raw(trace_ctx) };
+                let mut ctx = unsafe { ::zuqe_zapi::ZqGcTraceCtx::from(gcx) };
                 ::zuqe_zapi::ZqGcTrace::trace(payload, &mut ctx);
             };
             let new_instance = quote! {
                 /// Creates a JS instance wrapping `payload`.
-                pub fn new_instance<'cx>(
-                    cx: &::zuqe_zapi::ZqCtx<'cx>,
+                pub fn new_instance<'ctx>(
+                    ctx: &::zuqe_zapi::ZqCtx<'ctx>,
                     payload: #payload,
-                ) -> Result<::zuqe_zapi::ZqValue<'cx>, ::zuqe_zapi::ZqError> {
+                ) -> Result<::zuqe_zapi::ZqValue<'ctx>, ::zuqe_zapi::ZqError> {
                     let opaque = Box::into_raw(Box::new(payload)) as *mut ::core::ffi::c_void;
-                    match cx.new_instance(&#class_def, opaque) {
+                    match ctx.new_instance(&#class_def, opaque) {
                         Ok(v) => Ok(v),
                         Err(e) => {
                             unsafe { drop(Box::from_raw(opaque as *mut #payload)) };
@@ -597,11 +617,11 @@ fn expand_class(
             let accessors = quote! {
                 /// Returns the payload of a class instance.
                 pub fn payload<'a>(
-                    cx: &::zuqe_zapi::ZqCtx<'a>,
+                    ctx: &::zuqe_zapi::ZqCtx<'a>,
                     val: ::zuqe_zapi::ZqValue<'a>,
                 ) -> Option<&'a #payload> {
                     unsafe {
-                        let p = cx.get_native_ptr(val);
+                        let p = ctx.get_native_ptr(val);
                         if p.is_null() {
                             None
                         } else {
@@ -612,11 +632,11 @@ fn expand_class(
 
                 /// Returns the payload of a class instance, mutably.
                 pub fn payload_mut<'a>(
-                    cx: &::zuqe_zapi::ZqCtx<'a>,
+                    ctx: &::zuqe_zapi::ZqCtx<'a>,
                     val: ::zuqe_zapi::ZqValue<'a>,
                 ) -> Option<&'a mut #payload> {
                     unsafe {
-                        let p = cx.get_native_ptr(val);
+                        let p = ctx.get_native_ptr(val);
                         if p.is_null() {
                             None
                         } else {
@@ -629,13 +649,13 @@ fn expand_class(
         }
         None => {
             let finalize_body = quote! { let _ = opaque; };
-            let gc_trace_body = quote! { let _ = (opaque, trace_ctx); };
+            let gc_trace_body = quote! { let _ = (opaque, gcx); };
             let new_instance = quote! {
                 /// Creates a JS instance with no native payload.
-                pub fn new_instance<'cx>(
-                    cx: &::zuqe_zapi::ZqCtx<'cx>,
-                ) -> Result<::zuqe_zapi::ZqValue<'cx>, ::zuqe_zapi::ZqError> {
-                    cx.new_instance(&#class_def, ::core::ptr::null_mut())
+                pub fn new_instance<'c>(
+                    ctx: &::zuqe_zapi::ZqCtx<'c>,
+                ) -> Result<::zuqe_zapi::ZqValue<'c>, ::zuqe_zapi::ZqError> {
+                    ctx.new_instance(&#class_def, ::core::ptr::null_mut())
                 }
             };
             let accessors = quote! {};
@@ -648,7 +668,7 @@ fn expand_class(
             #[doc(hidden)]
             #[allow(non_snake_case)]
             unsafe extern "C" fn #gc_trace(
-                trace_ctx: *mut ::zuqe_zapi::ffi::ZqGcTraceCtxS,
+                gcx: *mut ::zuqe_zapi::ffi::ZqGcTraceCtxS,
                 opaque: *mut ::core::ffi::c_void,
             ) {
                 #gc_trace_body
@@ -708,8 +728,8 @@ fn expand_class(
             }
 
             /// Registers the class with the host.
-            pub fn register(cx: &::zuqe_zapi::ZqCtx) -> Result<(), ::zuqe_zapi::ZqError> {
-                cx.register_class(&#class_def).map(|_| ())
+            pub fn register(ctx: &::zuqe_zapi::ZqCtx) -> Result<(), ::zuqe_zapi::ZqError> {
+                ctx.register_class(&#class_def).map(|_| ())
             }
 
             #new_instance
@@ -720,14 +740,23 @@ fn expand_class(
 
 fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
     if im.trait_.is_some() {
-        return Err(Error::new_spanned(&im.self_ty, "class impl must be an inherent impl"));
+        return Err(Error::new_spanned(
+            &im.self_ty,
+            "class impl must be an inherent impl",
+        ));
     }
     if !im.generics.params.is_empty() {
-        return Err(Error::new_spanned(&im.generics, "class impl cannot be generic"));
+        return Err(Error::new_spanned(
+            &im.generics,
+            "class impl cannot be generic",
+        ));
     }
     let ty = match &*im.self_ty {
         Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().cloned().ok_or_else(|| {
-            Error::new_spanned(&im.self_ty, "class impl self type must be a plain identifier")
+            Error::new_spanned(
+                &im.self_ty,
+                "class impl self type must be a plain identifier",
+            )
         })?,
         _ => {
             return Err(Error::new_spanned(
@@ -894,8 +923,16 @@ fn gen_entries_array(
         let name_lit = LitByteStr::new(&b, Span::call_site());
         let name_ptr = quote! { #name_lit.as_ptr() as *const ::core::ffi::c_char };
         if *get || *set {
-            let get_field = if *get { quote! { Some(#tramp) } } else { quote! { None } };
-            let set_field = if *set { quote! { Some(#tramp) } } else { quote! { None } };
+            let get_field = if *get {
+                quote! { Some(#tramp) }
+            } else {
+                quote! { None }
+            };
+            let set_field = if *set {
+                quote! { Some(#tramp) }
+            } else {
+                quote! { None }
+            };
             quote! {
                 ::zuqe_zapi::ffi::ZqFieldDef::getset(#name_ptr, #get_field, #set_field, #magic)
             }
@@ -934,12 +971,18 @@ fn zq_method_entries(f: &ImplItemFn) -> syn::Result<Vec<(bool, String, bool, boo
                     Meta::Path(p) if p.is_ident("get") => get = true,
                     Meta::Path(p) if p.is_ident("set") => set = true,
                     Meta::NameValue(nv) if nv.path.is_ident("name") => {
-                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = &nv.value
+                        {
                             name = s.value();
                         }
                     }
                     Meta::NameValue(nv) if nv.path.is_ident("magic") => {
-                        if let Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) = &nv.value {
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Int(i), ..
+                        }) = &nv.value
+                        {
                             magic = i.base10_parse()?;
                         }
                     }
@@ -964,8 +1007,14 @@ fn magic_arg(args: &Punctuated<Meta, Token![,]>) -> syn::Result<i32> {
             continue;
         };
         if nv.path.is_ident("magic") {
-            let Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) = &nv.value else {
-                return Err(Error::new_spanned(&nv.value, "`magic` must be an integer literal"));
+            let Expr::Lit(ExprLit {
+                lit: Lit::Int(i), ..
+            }) = &nv.value
+            else {
+                return Err(Error::new_spanned(
+                    &nv.value,
+                    "`magic` must be an integer literal",
+                ));
             };
             magic = i.base10_parse()?;
         }
@@ -984,8 +1033,14 @@ fn func_arg_name(args: &Punctuated<Meta, Token![,]>) -> syn::Result<Option<Strin
             continue;
         };
         if nv.path.is_ident("name") {
-            let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value else {
-                return Err(Error::new_spanned(&nv.value, "`name` must be a string literal"));
+            let Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) = &nv.value
+            else {
+                return Err(Error::new_spanned(
+                    &nv.value,
+                    "`name` must be a string literal",
+                ));
             };
             out = Some(s.value());
         }
