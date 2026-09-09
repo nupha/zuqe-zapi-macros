@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
@@ -66,7 +69,7 @@ pub fn zq_export(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The annotated function is ALWAYS the module init hook (any name works; the
 /// standard is `module_init`), always registered — the host runs it once at
 /// evaluation time with a real `ZqEnv`. Two signature forms:
-/// `fn module_init(ctx: &ZqCtx) -> Result<(), ZqError>` for real init logic, or
+/// `fn module_init(ctx: ZqCtx) -> Result<(), ZqError>` for real init logic, or
 /// an empty `fn module_init() {}` for a registered no-op init.
 #[proc_macro_attribute]
 pub fn zq_module(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -90,9 +93,9 @@ pub fn zq_module(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// the `#[zq_class_impl]` constructor) plus helpers:
 ///
 /// - `class_def() -> &'static ZqClassDef`
-/// - `register(&ZqCtx) -> Result<(), ZqError>`
-/// - `new_instance(&ZqCtx, payload) -> Result<ZqValue, ZqError>` (with payload)
-/// - `payload(&ZqCtx, val) / payload_mut(...)` (with payload)
+/// - `register(ZqCtx) -> Result<(), ZqError>`
+/// - `new_instance(ZqCtx, payload) -> Result<ZqValue, ZqError>` (with payload)
+/// - `payload(ZqCtx, val) / payload_mut(...)` (with payload)
 ///
 /// `name` is the JS class name (defaults to the struct name); `payload`
 /// optionally names the struct holding per-instance state. A class without
@@ -194,11 +197,11 @@ fn expand_function(
     if func.sig.inputs.len() != 2 {
         return Err(Error::new_spanned(
             &func.sig,
-            "#[zq_function] requires signature: fn name(ZqCtx, CallInfo) -> Result<ZqValue<'_>, ZqError>",
+            "#[zq_function] requires signature: fn name(ZqCtx, ZqCallInfo) -> Result<ZqValue, ZqError>",
         ));
     }
 
-    let trampoline = format_ident!("__zq_trampoline_{}", fn_name);
+    let trampoline_fn = format_ident!("__zq_trampoline_{}", fn_name);
     let impl_fn = format_ident!("__zq_impl_{}", fn_name);
     let mut body = func;
     body.sig.ident = impl_fn.clone();
@@ -208,24 +211,18 @@ fn expand_function(
     name_bytes.push(0);
     let name_lit = LitByteStr::new(&name_bytes, Span::call_site());
 
-    let marker_doc = format!(
-        "The `#[zq_function]` `{fn_name}`.\n\n\
-         Call the Rust body directly with `{fn_name}::call(ctx, cc)`."
-    );
-
     Ok(quote! {
         #[doc(hidden)]
         #body
 
         #[doc(hidden)]
-        unsafe extern "C" fn #trampoline(
+        #[allow(non_snake_case)]
+        unsafe extern "C" fn #trampoline_fn(
             __env: ::zuqe_zapi::__private::ZqEnv,
             __info: ::zuqe_zapi::__private::ZqCallbackInfo,
         ) -> ::zuqe_zapi::__private::ZqRawValue {
             let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
             let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-            // The result IS the return value; on error return the exception
-            // sentinel (optionally carrying the thrown JS value in `thrown`).
             match #impl_fn(__cx, __cc) {
                 Ok(__v) => __v.raw(),
                 Err(__e) => {
@@ -236,24 +233,27 @@ fn expand_function(
             }
         }
 
-        #[doc = #marker_doc]
-        #[allow(non_camel_case_types)]
-        #[derive(Clone, Copy)]
         #vis struct #fn_name;
 
         impl #fn_name {
             #[allow(dead_code)]
-            #vis fn call<'a>(__cx: ::zuqe_zapi::ZqCtx<'a>, __cc: ::zuqe_zapi::ZqCallInfo<'a>) -> Result<::zuqe_zapi::ZqValue<'a>, ::zuqe_zapi::ZqError> {
+            #vis const fn trampoline() -> ::zuqe_zapi::ffi::ZqBodyFn {
+                #trampoline_fn
+            }
+
+            #[allow(dead_code)]
+            #vis fn call<'a>(
+                __cx: ::zuqe_zapi::ZqCtx<'a>,
+                __cc: ::zuqe_zapi::ZqCallInfo<'a>,
+            ) -> Result<::zuqe_zapi::ZqValue<'a>, ::zuqe_zapi::ZqError> {
                 #impl_fn(__cx, __cc)
             }
-        }
 
-        impl #fn_name {
             /// The `ZqFieldDef` for this function (for `#[zq_module(exports = ...)]`).
-            pub const fn item() -> ::zuqe_zapi::ffi::ZqFieldDef {
+            #vis const fn item() -> ::zuqe_zapi::ffi::ZqFieldDef {
                 ::zuqe_zapi::ffi::ZqFieldDef::func(
                     #name_lit.as_ptr() as *const ::core::ffi::c_char,
-                    #trampoline,
+                    #trampoline_fn,
                     0,
                     #magic,
                 )
@@ -402,7 +402,7 @@ fn expand_module(
 
     // The annotated function is ALWAYS the module init hook (any name; standard
     // is `module_init`), always registered. Two signature forms:
-    //   - `fn module_init(ctx: &ZqCtx) -> Result<(), ZqError>` — real init logic;
+    //   - `fn module_init(ctx: ZqCtx) -> Result<(), ZqError>` — real init logic;
     //   - `fn module_init() {}` — empty init (registered, runs once, no-op).
     let init_takes_cx = match func.sig.inputs.len() {
         0 => false,
@@ -600,10 +600,10 @@ fn expand_class(
             };
             let new_instance = quote! {
                 /// Creates a JS instance wrapping `payload`.
-                pub fn new_instance<'ctx>(
-                    ctx: &::zuqe_zapi::ZqCtx<'ctx>,
+                pub fn new_instance<'c>(
+                    ctx: ::zuqe_zapi::ZqCtx<'c>,
                     payload: #payload,
-                ) -> Result<::zuqe_zapi::ZqValue<'ctx>, ::zuqe_zapi::ZqError> {
+                ) -> Result<::zuqe_zapi::ZqValue<'c>, ::zuqe_zapi::ZqError> {
                     let opaque = Box::into_raw(Box::new(payload)) as *mut ::core::ffi::c_void;
                     match ctx.new_instance(&#class_def, opaque) {
                         Ok(v) => Ok(v),
@@ -617,7 +617,7 @@ fn expand_class(
             let accessors = quote! {
                 /// Returns the payload of a class instance.
                 pub fn payload<'a>(
-                    ctx: &::zuqe_zapi::ZqCtx<'a>,
+                    ctx: ::zuqe_zapi::ZqCtx<'a>,
                     val: ::zuqe_zapi::ZqValue<'a>,
                 ) -> Option<&'a #payload> {
                     unsafe {
@@ -632,7 +632,7 @@ fn expand_class(
 
                 /// Returns the payload of a class instance, mutably.
                 pub fn payload_mut<'a>(
-                    ctx: &::zuqe_zapi::ZqCtx<'a>,
+                    ctx: ::zuqe_zapi::ZqCtx<'a>,
                     val: ::zuqe_zapi::ZqValue<'a>,
                 ) -> Option<&'a mut #payload> {
                     unsafe {
@@ -653,7 +653,7 @@ fn expand_class(
             let new_instance = quote! {
                 /// Creates a JS instance with no native payload.
                 pub fn new_instance<'c>(
-                    ctx: &::zuqe_zapi::ZqCtx<'c>,
+                    ctx: ::zuqe_zapi::ZqCtx<'c>,
                 ) -> Result<::zuqe_zapi::ZqValue<'c>, ::zuqe_zapi::ZqError> {
                     ctx.new_instance(&#class_def, ::core::ptr::null_mut())
                 }
@@ -728,7 +728,7 @@ fn expand_class(
             }
 
             /// Registers the class with the host.
-            pub fn register(ctx: &::zuqe_zapi::ZqCtx) -> Result<(), ::zuqe_zapi::ZqError> {
+            pub fn register(ctx: ::zuqe_zapi::ZqCtx) -> Result<(), ::zuqe_zapi::ZqError> {
                 ctx.register_class(&#class_def).map(|_| ())
             }
 
