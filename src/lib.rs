@@ -47,7 +47,7 @@ pub fn zq_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// fn name(ctx: ZqCtx) -> Result<ZqValue<'_>, ZqError>
 /// ```
 ///
-/// The value is built at module-evaluation time with a real `ZqEnv`, so it can
+/// The value is built at module-evaluation time with a real `ZqRawCtx`, so it can
 /// be any JS value (string, number, object, array, ...).
 #[proc_macro_attribute]
 pub fn zq_export(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -70,7 +70,7 @@ pub fn zq_export(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The annotated function is ALWAYS the module init hook (any name works; the
 /// standard is `module_init`), always registered — the host runs it once at
-/// evaluation time with a real `ZqEnv`. Two signature forms:
+/// evaluation time with a real `ZqRawCtx`. Two signature forms:
 /// `fn module_init(ctx: ZqCtx) -> Result<(), ZqError>` for real init logic, or
 /// an empty `fn module_init() {}` for a registered no-op init.
 #[proc_macro_attribute]
@@ -220,10 +220,10 @@ fn expand_function(
         #[doc(hidden)]
         #[allow(non_snake_case)]
         unsafe extern "C" fn #trampoline_fn(
-            __env: ::zuqe_zapi::__private::ZqEnv,
-            __info: ::zuqe_zapi::__private::ZqCallbackInfo,
+            __env: ::zuqe_zapi::__private::ZqRawCtx,
+            __info: *mut ::zuqe_zapi::ffi::ZqCallInfoS,
         ) -> ::zuqe_zapi::__private::ZqRawValue {
-            let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
+            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
             let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
             match #impl_fn(__cx, __cc) {
                 Ok(__v) => __v.raw(),
@@ -300,10 +300,10 @@ fn expand_export(
         #[doc(hidden)]
         #[allow(non_snake_case)]
         unsafe extern "C" fn #value_fn(
-            __env: ::zuqe_zapi::ffi::ZqEnv,
+            __env: ::zuqe_zapi::ffi::ZqRawCtx,
             __out: *mut ::zuqe_zapi::ffi::ZqRawValue,
         ) -> i32 {
-            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from_raw(__env) };
+            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
             match #impl_fn(__cx) {
                 Ok(__v) => {
                     unsafe { *__out = __v.raw() };
@@ -432,11 +432,11 @@ fn expand_module(
     };
 
     // Module init hook: wrapped so the host can call it at evaluation time
-    // with a real `ZqEnv`; non-zero return signals failure. Always registered
+    // with a real `ZqRawCtx`; non-zero return signals failure. Always registered
     // (an empty `fn module_init() {}` is a registered no-op init).
     let init_body = if init_takes_cx {
         quote! {
-            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from_raw(__env) };
+            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
             match #fn_name(&__cx) {
                 Ok(()) => 0,
                 Err(_) => 1,
@@ -452,7 +452,7 @@ fn expand_module(
         #[doc(hidden)]
         #[allow(non_snake_case)]
         #[allow(unused_variables)]
-        unsafe extern "C" fn __zq_module_init(__env: ::zuqe_zapi::ffi::ZqEnv) -> i32 {
+        unsafe extern "C" fn __zq_module_init(__env: ::zuqe_zapi::ffi::ZqRawCtx) -> i32 {
             #init_body
         }
     };

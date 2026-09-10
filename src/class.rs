@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
@@ -324,10 +327,10 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
             #[doc(hidden)]
             #[allow(non_snake_case)]
             unsafe extern "C" fn #ctor_tramp(
-                __env: ::zuqe_zapi::__private::ZqEnv,
-                __info: ::zuqe_zapi::__private::ZqCallbackInfo,
+                __env:                 ::zuqe_zapi::__private::ZqRawCtx,
+                __info: *mut ::zuqe_zapi::ffi::ZqCallInfoS,
             ) -> ::zuqe_zapi::__private::ZqRawValue {
-                let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
+                let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
                 let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
                 match #ty::constructor(__cx, __cc) {
                     Ok(__v) => __v.raw(),
@@ -340,11 +343,11 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
             }
 
             #[allow(non_upper_case_globals)]
-            const #ctor_sym: Option<::zuqe_zapi::__private::ZqCallback> = Some(#ctor_tramp);
+            const #ctor_sym: Option<::zuqe_zapi::__private::ZqCallbackFn> = Some(#ctor_tramp);
         },
         None => quote! {
             #[allow(non_upper_case_globals)]
-            const #ctor_sym: Option<::zuqe_zapi::__private::ZqCallback> = None;
+            const #ctor_sym: Option<::zuqe_zapi::__private::ZqCallbackFn> = None;
         },
     };
 
@@ -357,10 +360,10 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 unsafe extern "C" fn #tramp(
-                    __env: ::zuqe_zapi::__private::ZqEnv,
-                    __info: ::zuqe_zapi::__private::ZqCallbackInfo,
+                    __env: ::zuqe_zapi::__private::ZqRawCtx,
+                    __info: *mut ::zuqe_zapi::ffi::ZqCallInfoS,
                 ) -> ::zuqe_zapi::__private::ZqRawValue {
-                    let __cx = unsafe { ::zuqe_zapi::__private::ZqCtx::from_raw(__env) };
+                    let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
                     let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
                     match #ty::#ident(__cx, __cc) {
                         Ok(__v) => __v.raw(),
