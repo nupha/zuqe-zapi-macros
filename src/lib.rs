@@ -227,11 +227,7 @@ fn expand_function(
             let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
             match #impl_fn(__cx, __cc) {
                 Ok(__v) => __v.raw(),
-                Err(__e) => {
-                    let __ex = __e.exception().unwrap_or_else(|| __cx.throw_error(&__e));
-                    unsafe { (*__info).thrown = __ex };
-                    ::zuqe_zapi::__private::exception_value()
-                }
+                Err(_) => ::zuqe_zapi::ZqValue::exception_value(),
             }
         }
 

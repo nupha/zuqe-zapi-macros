@@ -334,11 +334,7 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
                 let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
                 match #ty::constructor(__cx, __cc) {
                     Ok(__v) => __v.raw(),
-                    Err(__e) => {
-                        let __ex = __e.exception().unwrap_or_else(|| __cx.throw_error(&__e));
-                        unsafe { (*__info).thrown = __ex };
-                        ::zuqe_zapi::__private::exception_value()
-                    }
+                    Err(_) => ::zuqe_zapi::ZqValue::exception_value(),
                 }
             }
 
@@ -367,11 +363,7 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
                     let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
                     match #ty::#ident(__cx, __cc) {
                         Ok(__v) => __v.raw(),
-                        Err(__e) => {
-                            let __ex = __e.exception().unwrap_or_else(|| __cx.throw_error(&__e));
-                            unsafe { (*__info).thrown = __ex };
-                            ::zuqe_zapi::__private::exception_value()
-                        }
+                        Err(_) => ::zuqe_zapi::ZqValue::exception_value(),
                     }
                 }
             }
