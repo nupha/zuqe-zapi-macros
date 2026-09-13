@@ -112,11 +112,11 @@ pub(super) fn expand_class(
             let accessors = quote! {
                 /// Returns the payload of a class instance.
                 pub fn payload<'a>(
-                    ctx: ::zuqe_zapi::ZqCtx<'a>,
+                    _ctx: ::zuqe_zapi::ZqCtx<'a>,
                     val: ::zuqe_zapi::ZqValue<'a>,
                 ) -> Option<&'a #payload> {
                     unsafe {
-                        let p = ctx.get_native_ptr(val);
+                        let p = ::zuqe_zapi::__private::get_object_payload_ptr(val);
                         if p.is_null() {
                             None
                         } else {
@@ -127,11 +127,11 @@ pub(super) fn expand_class(
 
                 /// Returns the payload of a class instance, mutably.
                 pub fn payload_mut<'a>(
-                    ctx: ::zuqe_zapi::ZqCtx<'a>,
+                    _ctx: ::zuqe_zapi::ZqCtx<'a>,
                     val: ::zuqe_zapi::ZqValue<'a>,
                 ) -> Option<&'a mut #payload> {
                     unsafe {
-                        let p = ctx.get_native_ptr(val);
+                        let p = ::zuqe_zapi::__private::get_object_payload_ptr(val);
                         if p.is_null() {
                             None
                         } else {
