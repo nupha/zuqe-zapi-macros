@@ -68,6 +68,11 @@ pub fn zq_export(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// `name` is a decorative module label (host identity is the dylib URL).
 ///
+/// `finalize = my_fn` optionally registers a runtime-finalize hook
+/// `fn(*mut ZqRuntime)`, called once per runtime that imported this module when
+/// that runtime is torn down. Use it to release runtime-scoped native state
+/// (thread_locals, boxed GC-trace opaques); it must not call any JS API.
+///
 /// The annotated function is ALWAYS the module init hook (any name works; the
 /// standard is `module_init`), always registered — the host runs it once at
 /// evaluation time with a real `ZqRawCtx`. Two signature forms:
@@ -338,6 +343,9 @@ struct ModuleArgs {
     /// Named slice `exports = MY_EXPORTS` (a `const`/`static` `[ZqFieldDef; _]`),
     /// referenced directly instead of an inline list.
     exports_named: Option<Path>,
+    /// Optional runtime-finalize hook: a `fn(*mut ZqRuntime)` called once per
+    /// runtime that imported this module, when that runtime is torn down.
+    finalize: Option<Path>,
 }
 
 fn parse_path_list(expr: &Expr) -> syn::Result<Vec<Path>> {
@@ -358,6 +366,7 @@ fn parse_module_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ModuleAr
         name: None,
         exports: Vec::new(),
         exports_named: None,
+        finalize: None,
     };
     for meta in args {
         match meta {
@@ -383,8 +392,20 @@ fn parse_module_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ModuleAr
                     ));
                 }
             },
+            Meta::NameValue(nv) if nv.path.is_ident("finalize") => {
+                let Expr::Path(p) = &nv.value else {
+                    return Err(Error::new_spanned(
+                        &nv.value,
+                        "`finalize` must be a path to a `fn(*mut ZqRuntime)`",
+                    ));
+                };
+                out.finalize = Some(p.path.clone());
+            }
             other => {
-                return Err(Error::new_spanned(other, "expected `name` or `exports`"));
+                return Err(Error::new_spanned(
+                    other,
+                    "expected `name`, `exports`, or `finalize`",
+                ));
             }
         }
     }
@@ -467,6 +488,22 @@ fn expand_module(
         }
     };
 
+    // Optional runtime-finalize trampoline: `fn(*mut ZqRuntime)` → C ABI taking
+    // the opaque runtime handle. Emitted as a nested fn so it has a stable address.
+    let runtime_finalize_expr = match &parsed.finalize {
+        Some(path) => quote! {
+            Some({
+                unsafe extern "C" fn __zq_runtime_finalize(
+                    __rt: *mut ::zuqe_zapi::ffi::ZqRuntime,
+                ) {
+                    #path(__rt);
+                }
+                __zq_runtime_finalize
+            })
+        },
+        None => quote! { ::core::option::Option::None },
+    };
+
     Ok(quote! {
         #func
         #init_tramp
@@ -492,6 +529,7 @@ fn expand_module(
                 (*__info).exports = __exports.as_ptr();
                 (*__info).exports_len = __exports.len();
                 (*__info).init = #init_expr;
+                (*__info).runtime_finalize = #runtime_finalize_expr;
                 (*__info).struct_size =
                     ::std::mem::size_of::<::zuqe_zapi::__private::ZqModuleInfo>() as u32;
                 (*__info).version = ::zuqe_zapi::__private::ZQ_VERSION_PACKED;
