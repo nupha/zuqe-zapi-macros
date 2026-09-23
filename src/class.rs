@@ -139,6 +139,27 @@ pub(super) fn expand_class(
                         }
                     }
                 }
+
+                /// Detaches the payload of a class instance, returning it as an
+                /// owned `Box`. The instance keeps no payload afterwards (its
+                /// finalizer and GC trace see null), and the engine will no
+                /// longer free or trace the returned data — dropping the `Box`
+                /// releases it. Use this to release the payload early instead
+                /// of waiting for GC. Unsafe by type contract: `val` must be an
+                /// instance of this class.
+                pub fn take_payload<'a>(
+                    _: ::zuqe_zapi::ZqCtx<'a>,
+                    val: ::zuqe_zapi::ZqValue<'a>,
+                ) -> Option<::std::boxed::Box<#payload>> {
+                    unsafe {
+                        let p = ::zuqe_zapi::__private::take_object_payload_ptr(val);
+                        if p.is_null() {
+                            None
+                        } else {
+                            Some(::std::boxed::Box::from_raw(p as *mut #payload))
+                        }
+                    }
+                }
             };
             (finalize_body, gc_trace_body, new_instance, accessors)
         }
