@@ -451,7 +451,11 @@ fn gen_entries_array(
     }
 }
 
-fn zq_method_entries(f: &ImplItemFn) -> syn::Result<Vec<(bool, String, bool, bool, i32)>> {
+/// `(is_static, js_name, get, set, magic)` for one entry produced by a
+/// `#[zq_method]` / `#[zq_static_method]` attribute on a class method.
+type MethodMeta = (bool, String, bool, bool, i32);
+
+fn zq_method_entries(f: &ImplItemFn) -> syn::Result<Vec<MethodMeta>> {
     let mut entries = Vec::new();
     for attr in &f.attrs {
         let is_static = if attr.path().is_ident("zq_static_method") {
