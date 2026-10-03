@@ -219,7 +219,11 @@ fn expand_function(
     let name_lit = LitByteStr::new(&name_bytes, Span::call_site());
 
     Ok(quote! {
+        // The body is renamed to `__zq_impl_<fn_name>`, so a CamelCase
+        // `fn_name` (which the marker type below effectively requires) would
+        // otherwise trip `non_snake_case` on a name we invented.
         #[doc(hidden)]
+        #[allow(non_snake_case)]
         #body
 
         #[doc(hidden)]
@@ -236,6 +240,10 @@ fn expand_function(
             }
         }
 
+        // Marker type so `#[zq_module(exports = [...])]` can reference this item
+        // and `trampoline()` has something to hang off. It keeps the user's fn
+        // name, so a snake_case fn would otherwise trip `non_camel_case_types`.
+        #[allow(non_camel_case_types)]
         #vis struct #fn_name;
 
         impl #fn_name {
