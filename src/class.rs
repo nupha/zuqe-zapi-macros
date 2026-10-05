@@ -351,9 +351,9 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
                 __env:                 ::zuqe_zapi::__private::ZqRawCtx,
                 __info: *mut ::zuqe_zapi::ffi::ZqCallInfoS,
             ) -> ::zuqe_zapi::__private::ZqRawValue {
-                let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
+                let __ctx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
                 let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-                match #ty::constructor(__cx, __cc) {
+                match #ty::constructor(__ctx, __cc) {
                     Ok(__v) => __v.raw(),
                     Err(_) => ::zuqe_zapi::ZqValue::exception_value(),
                 }
@@ -380,9 +380,9 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
                     __env: ::zuqe_zapi::__private::ZqRawCtx,
                     __info: *mut ::zuqe_zapi::ffi::ZqCallInfoS,
                 ) -> ::zuqe_zapi::__private::ZqRawValue {
-                    let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
+                    let __ctx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
                     let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-                    match #ty::#ident(__cx, __cc) {
+                    match #ty::#ident(__ctx, __cc) {
                         Ok(__v) => __v.raw(),
                         Err(_) => ::zuqe_zapi::ZqValue::exception_value(),
                     }

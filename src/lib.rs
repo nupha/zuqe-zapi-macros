@@ -232,9 +232,9 @@ fn expand_function(
             __env: ::zuqe_zapi::__private::ZqRawCtx,
             __info: *mut ::zuqe_zapi::ffi::ZqCallInfoS,
         ) -> ::zuqe_zapi::__private::ZqRawValue {
-            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
+            let __ctx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
             let __cc = ::zuqe_zapi::ZqCallInfo::new(__info);
-            match #impl_fn(__cx, __cc) {
+            match #impl_fn(__ctx, __cc) {
                 Ok(__v) => __v.raw(),
                 Err(_) => ::zuqe_zapi::ZqValue::exception_value(),
             }
@@ -254,10 +254,10 @@ fn expand_function(
 
             #[allow(dead_code)]
             #vis fn call<'a>(
-                __cx: ::zuqe_zapi::ZqCtx<'a>,
+                __ctx: ::zuqe_zapi::ZqCtx<'a>,
                 __cc: ::zuqe_zapi::ZqCallInfo<'a>,
             ) -> Result<::zuqe_zapi::ZqValue<'a>, ::zuqe_zapi::ZqError> {
-                #impl_fn(__cx, __cc)
+                #impl_fn(__ctx, __cc)
             }
 
             /// The `ZqFieldDef` for this function (for `#[zq_module(exports = ...)]`).
@@ -312,8 +312,8 @@ fn expand_export(
             __env: ::zuqe_zapi::ffi::ZqRawCtx,
             __out: *mut ::zuqe_zapi::ffi::ZqRawValue,
         ) -> i32 {
-            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
-            match #impl_fn(__cx) {
+            let __ctx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
+            match #impl_fn(__ctx) {
                 Ok(__v) => {
                     unsafe { *__out = __v.raw() };
                     0
@@ -431,7 +431,7 @@ fn expand_module(
     // is `module_init`), always registered. Two signature forms:
     //   - `fn module_init(ctx: ZqCtx) -> Result<(), ZqError>` — real init logic;
     //   - `fn module_init() {}` — empty init (registered, runs once, no-op).
-    let init_takes_cx = match func.sig.inputs.len() {
+    let init_takes_ctx = match func.sig.inputs.len() {
         0 => false,
         1 => true,
         n => {
@@ -459,10 +459,10 @@ fn expand_module(
     // Module init hook: wrapped so the host can call it at evaluation time
     // with a real `ZqRawCtx`; non-zero return signals failure. Always registered
     // (an empty `fn module_init() {}` is a registered no-op init).
-    let init_body = if init_takes_cx {
+    let init_body = if init_takes_ctx {
         quote! {
-            let __cx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
-            match #fn_name(&__cx) {
+            let __ctx = unsafe { ::zuqe_zapi::ZqCtx::from(__env) };
+            match #fn_name(&__ctx) {
                 Ok(()) => 0,
                 Err(_) => 1,
             }
