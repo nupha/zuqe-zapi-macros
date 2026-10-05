@@ -197,8 +197,39 @@ fn expand_function(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = func.sig.ident.clone();
     let vis = func.vis.clone();
-    let js_name = func_arg_name(&args)?.unwrap_or_else(|| fn_name.to_string());
-    let magic = magic_arg(&args)?;
+
+    // Every `#[zq_function]` stacked below the one being expanded arrives on
+    // this same item (the attribute being expanded is *not* in `func.attrs` - it
+    // arrives as `attr`). Reading them here and stripping them from the body is
+    // what makes stacking work: left in place, each would expand separately
+    // against the already-renamed body and collide.
+    let mut names: Vec<(String, i32)> = vec![(
+        func_arg_name(&args)?.unwrap_or_else(|| fn_name.to_string()),
+        magic_arg(&args)?,
+    )];
+    let mut kept_attrs = Vec::new();
+    for attr in func.attrs.iter() {
+        if attr.path().is_ident("zq_function") {
+            let extra = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+            names.push((
+                func_arg_name(&extra)?.unwrap_or_else(|| fn_name.to_string()),
+                magic_arg(&extra)?,
+            ));
+        } else {
+            // doc comments, `cfg`, and anything else the user attached: keep.
+            kept_attrs.push(attr.clone());
+        }
+    }
+    for (i, (n, _)) in names.iter().enumerate() {
+        if let Some((j, _)) = names[..i].iter().find(|(p, _)| p == n) {
+            return Err(Error::new(
+                func.sig.ident.span(),
+                format!(
+                    "#[zq_function] stack publishes the JS name `{n}` twice (entries {j} and {i}); names must be unique"
+                ),
+            ));
+        }
+    }
 
     // Validate signature: 2 params, return Result<ZqValue<'_>, ZqError>
     if func.sig.inputs.len() != 2 {
@@ -210,13 +241,29 @@ fn expand_function(
 
     let trampoline_fn = format_ident!("__zq_trampoline_{}", fn_name);
     let impl_fn = format_ident!("__zq_impl_{}", fn_name);
+    let fields_const = format_ident!("__ZQ_FIELDS_{}", fn_name);
     let mut body = func;
     body.sig.ident = impl_fn.clone();
     body.vis = syn::Visibility::Inherited;
+    body.attrs = kept_attrs;
 
-    let mut name_bytes = js_name.as_bytes().to_vec();
-    name_bytes.push(0);
-    let name_lit = LitByteStr::new(&name_bytes, Span::call_site());
+    // One field per stacked attribute, all sharing the single trampoline above.
+    // The trampoline reads `cc.magic()`, so the per-field magic is what tells
+    // the body which name it was called under.
+    let n_fields = names.len();
+    let field_defs = names.iter().map(|(n, m)| {
+        let mut name_bytes = n.as_bytes().to_vec();
+        name_bytes.push(0);
+        let name_lit = LitByteStr::new(&name_bytes, Span::call_site());
+        quote! {
+            ::zuqe_zapi::ffi::ZqFieldDef::func(
+                #name_lit.as_ptr() as *const ::core::ffi::c_char,
+                #trampoline_fn,
+                0,
+                #m,
+            )
+        }
+    });
 
     Ok(quote! {
         // The body is renamed to `__zq_impl_<fn_name>`, so a CamelCase
@@ -246,6 +293,11 @@ fn expand_function(
         #[allow(non_camel_case_types)]
         #vis struct #fn_name;
 
+        // Every JS name this body answers to, one `ZqFieldDef` each.
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        const #fields_const: [::zuqe_zapi::ffi::ZqFieldDef; #n_fields] = [#(#field_defs),*];
+
         impl #fn_name {
             #[allow(dead_code)]
             #vis const fn trampoline() -> ::zuqe_zapi::ffi::ZqBodyFn {
@@ -260,14 +312,15 @@ fn expand_function(
                 #impl_fn(__ctx, __cc)
             }
 
-            /// The `ZqFieldDef` for this function (for `#[zq_module(exports = ...)]`).
+            /// The first `ZqFieldDef` of this function. Use [`Self::items`] to
+            /// publish every name a stacked attribute added.
             #vis const fn item() -> ::zuqe_zapi::ffi::ZqFieldDef {
-                ::zuqe_zapi::ffi::ZqFieldDef::func(
-                    #name_lit.as_ptr() as *const ::core::ffi::c_char,
-                    #trampoline_fn,
-                    0,
-                    #magic,
-                )
+                #fields_const[0]
+            }
+
+            /// All `ZqFieldDef`s this body publishes - one per `#[zq_function]`.
+            #vis const fn items() -> &'static [::zuqe_zapi::ffi::ZqFieldDef] {
+                &#fields_const
             }
         }
     })
@@ -294,6 +347,7 @@ fn expand_export(
 
     let impl_fn = format_ident!("__zq_impl_{}", fn_name);
     let value_fn = format_ident!("__zq_value_{}", fn_name);
+    let fields_const = format_ident!("__ZQ_FIELDS_{}", fn_name);
     let mut body = func;
     body.sig.ident = impl_fn.clone();
     body.vis = syn::Visibility::Inherited;
@@ -328,13 +382,25 @@ fn expand_export(
         #[derive(Clone, Copy)]
         struct #fn_name;
 
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        const #fields_const: [::zuqe_zapi::ffi::ZqFieldDef; 1] = [
+            ::zuqe_zapi::ffi::ZqFieldDef::value(
+                #name_lit.as_ptr() as *const ::core::ffi::c_char,
+                #value_fn,
+            )
+        ];
+
         impl #fn_name {
             /// The `ZqFieldDef` for this value (for `#[zq_module(exports = ...)]`).
             pub const fn item() -> ::zuqe_zapi::ffi::ZqFieldDef {
-                ::zuqe_zapi::ffi::ZqFieldDef::value(
-                    #name_lit.as_ptr() as *const ::core::ffi::c_char,
-                    #value_fn,
-                )
+                #fields_const[0]
+            }
+
+            /// All `ZqFieldDef`s this body publishes. `exports` concatenates
+            /// slices, so every export kind has the same shape.
+            pub const fn items() -> &'static [::zuqe_zapi::ffi::ZqFieldDef] {
+                &#fields_const
             }
         }
     })
@@ -483,16 +549,17 @@ fn expand_module(
     };
     let init_expr = quote! { Some(__zq_module_init) };
 
-    // Either a named `const`/`static` slice of `ZqFieldDef`, or an inline list
-    // built via each item's `::item()`.
+    // Either a named `const`/`static` slice of `ZqFieldDef`, or an inline list built
+    // by concatenating each item's `::items()`. Items publish a slice rather than
+    // a single field so a stacked `#[zq_function]` can contribute several names.
     let exports_expr = if let Some(named) = &parsed.exports_named {
         quote! { #named.iter().copied().collect::<::std::vec::Vec<_>>() }
     } else {
         let exports_items = &parsed.exports;
         quote! {
             ::std::vec![
-                #(#exports_items::item()),*
-            ]
+                #(#exports_items::items()),*
+            ].concat()
         }
     };
 

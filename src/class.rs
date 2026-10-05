@@ -74,6 +74,7 @@ pub(super) fn expand_class(
     let finalize = format_ident!("__zq_class_finalize_{}", ty);
     let gc_trace = format_ident!("__zq_class_gc_trace_{}", ty);
     let class_def = format_ident!("__ZQ_CLASS_DEF_{}", ty);
+    let fields_const = format_ident!("__ZQ_FIELDS_{}", ty);
     let ctor_sym = format_ident!("__ZQ_CTOR_{}", ty);
     let proto_entries_sym = format_ident!("__ZQ_PROTO_ENTRIES_{}", ty);
     let static_entries_sym = format_ident!("__ZQ_STATIC_ENTRIES_{}", ty);
@@ -229,6 +230,18 @@ pub(super) fn expand_class(
             static_entries_len: #static_entries_sym.len(),
         };
 
+        // A class always contributes exactly one field, but it publishes through
+        // the same slice shape a stacked `#[zq_function]` uses, so `exports` can
+        // treat every export kind identically.
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        const #fields_const: [::zuqe_zapi::ffi::ZqFieldDef; 1] = [
+            ::zuqe_zapi::ffi::ZqFieldDef::class(
+                #class_def.name,
+                &#class_def,
+            )
+        ];
+
         impl #ty {
             /// Returns the `ZqClassDef` for this class (registered by the module).
             pub const fn class_def() -> &'static ::zuqe_zapi::ffi::ZqClassDef {
@@ -237,10 +250,12 @@ pub(super) fn expand_class(
 
             /// The `ZqFieldDef` for this class (for `#[zq_module(exports = ...)]`).
             pub const fn item() -> ::zuqe_zapi::ffi::ZqFieldDef {
-                ::zuqe_zapi::ffi::ZqFieldDef::class(
-                    Self::class_def().name,
-                    Self::class_def(),
-                )
+                #fields_const[0]
+            }
+
+            /// All `ZqFieldDef`s this item publishes.
+            pub const fn items() -> &'static [::zuqe_zapi::ffi::ZqFieldDef] {
+                &#fields_const
             }
 
             /// Registers the class with the host.
