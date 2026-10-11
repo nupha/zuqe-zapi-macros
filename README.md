@@ -7,7 +7,7 @@ trampolines, or other FFI details.
 
 - Companion crates: `zuqe_zapi` (ABI contract + safe layer), `zuqe_zapi_macros`
   (this crate, procedural macros).
-- Reference projects: `~/devel/zhuque/examples/zapi_basic`, `zapi_event`; `~/workspace/demo_llm/aike-tools`.
+- Reference projects: `~/devel/zhuque/examples/zapi_basic`, `zapi_event`; `~/workspace/demo_llm/aike-extensions` (module `tools`).
 
 ---
 
@@ -25,7 +25,8 @@ trampolines, or other FFI details.
    known to have no GC nodes you can explicitly use `payload_no_gc` to skip the
    per-instance trace calls.
 4. **Extensible**: the `#[zq_module]` init hook carries module-load initialization
-   (e.g. registering a `thread_local` GC trace).
+   (e.g. registering a `thread_local` GC trace), and its optional `finalize` hook
+   carries per-runtime teardown.
 5. **Single-module model**: one dylib = one module (the sole `zq_module_register`
    symbol); module identity is determined by the dylib's absolute path URL (also
    readable from Rust via `zuqe_zapi::module_path()`), `name` is only decorative.
@@ -37,28 +38,28 @@ trampolines, or other FFI details.
 crate-type = ["cdylib"]
 
 [dependencies]
-zuqe_zapi = "0.2"
-zuqe_zapi_macros = "0.2"
+zuqe_zapi = "0.3"
+zuqe_zapi_macros = "0.3"
 ```
 
 ---
 
 ## Macro overview
 
-| Macro                  | Purpose                                                                                      | Attached to    |
-| ---------------------- | -------------------------------------------------------------------------------------------- | -------------- |
-| `#[zq_function]`       | Declares a Rust function as JS-callable and makes it **exportable** (generates `ZqFieldDef`) | function       |
-| `#[zq_export]`         | Declares a lazily built **JS value export**                                                  | function       |
-| `#[zq_class]`          | Declares a native class (payload + GC trace)                                                 | struct         |
-| `#[zq_class_impl]`     | Fills in class behavior (constructor + methods)                                              | impl block     |
-| `#[zq_method]`         | Marks an instance method/accessor (on the prototype)                                         | method in impl |
-| `#[zq_static_method]`  | Marks a static method/accessor (on the constructor)                                          | method in impl |
-| `#[zq_module]`         | Generates the module entry; `exports = [...]` decides actual exports; may carry an init hook | function       |
-| `#[derive(ZqGcTrace)]` | GC trace derivation for payloads                                                             | struct         |
+| Macro                  | Purpose                                                                                                                  | Attached to    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| `#[zq_function]`       | Declares a Rust function as JS-callable and makes it **exportable** (generates `ZqFieldDef`)                             | function       |
+| `#[zq_export]`         | Declares a lazily built **JS value export**                                                                              | function       |
+| `#[zq_class]`          | Declares a native class (payload + GC trace)                                                                             | struct         |
+| `#[zq_class_impl]`     | Fills in class behavior (constructor + methods)                                                                          | impl block     |
+| `#[zq_method]`         | Marks an instance method/accessor (on the prototype)                                                                     | method in impl |
+| `#[zq_static_method]`  | Marks a static method/accessor (on the constructor)                                                                      | method in impl |
+| `#[zq_module]`         | Generates the module entry; `exports = [...]` decides actual exports; may carry an init hook and a runtime-finalize hook | function       |
+| `#[derive(ZqGcTrace)]` | GC trace derivation for payloads                                                                                         | struct         |
 
 > **"Export" semantics**: `#[zq_function]` / `#[zq_export]` / `#[zq_class]` only make an
-> item **exportable** (generating a `ZqFieldDef`, via each item's `item()`); it is only
-> actually `import`ed into the module namespace once the item is listed in
+> item **exportable** (generating a `ZqFieldDef`, via each item's `item()` / `items()`); it
+> is only actually `import`ed into the module namespace once the item is listed in
 > `#[zq_module(exports = [...])]`.
 
 ---
@@ -88,9 +89,26 @@ fn add<'a>(cx: ZqCtx<'a>, cc: ZqCallInfo<'a>) -> Result<ZqValue<'a>, ZqError>
   `#[zq_method]` magic dispatch below).
 - Returns `Result<ZqValue, ZqError>`; an `Err` is thrown back to JS at the boundary.
 
-The macro generates: the FFI trampoline, a marker struct exposing `item()`
-(`ZqFieldDef::Func`), `call()` (invokes the Rust fn directly), and
-`trampoline()`.
+**Stacking for several JS names**: repeat the attribute on the same function to publish
+one body under multiple JS names. Each stacked `#[zq_function]` contributes its own
+`name` / `magic`; the body reads `cc.magic()` to tell which name it was called under. The
+names must be unique (a duplicate is a compile error). List the function once in `exports`
+and every stacked name is exported.
+
+```rust
+#[zq_function(name = "fire", magic = 1)]
+#[zq_function(name = "spark", magic = 2)]
+fn ignite<'a>(cx: ZqCtx<'a>, cc: ZqCallInfo<'a>) -> Result<ZqValue<'a>, ZqError> {
+    match cc.magic() {
+        1 => Ok(ZqValue::new_string(cx, "fire")?),
+        _ => Ok(ZqValue::new_string(cx, "spark")?),
+    }
+}
+```
+
+The macro generates: the FFI trampoline, a marker struct exposing `item()` (the first
+`ZqFieldDef::Func`), `items()` (every name a stacked attribute added), `call()` (invokes
+the Rust fn directly), and `trampoline()`.
 
 **Example**:
 
@@ -127,7 +145,7 @@ fn version<'a>(cx: ZqCtx<'a>) -> Result<ZqValue<'a>, ZqError>
 ```
 
 The macro generates: the value-building trampoline, a marker type exposing
-`item()` (`ZqFieldDef::Value`).
+`item()` (`ZqFieldDef::Value`) and `items()`.
 
 **Example**:
 
@@ -135,8 +153,8 @@ The macro generates: the value-building trampoline, a marker type exposing
 #[zq_export(name = "demo_obj")]
 fn demo_obj<'a>(cx: ZqCtx<'a>) -> Result<ZqValue<'a>, ZqError> {
     let obj = ZqValue::new_object(cx)?;
-    obj.set_str(cx, "version", ZqValue::new_string(cx, "0.1.0")?)?;
-    obj.set_str(cx, "copyright", ZqValue::new_string(cx, "© 2026 aike")?)?;
+    obj.set_property_str(cx, "version", ZqValue::new_string(cx, "0.1.0")?)?;
+    obj.set_property_str(cx, "copyright", ZqValue::new_string(cx, "© 2026 aike")?)?;
     Ok(obj)
 }
 ```
@@ -145,7 +163,7 @@ On the JS side: `demo_obj.version` / `demo_obj.copyright`.
 
 > `ZqValue` converts from `i32`/`u32`/`f64`/`bool` automatically; strings and other
 > JS values must be built explicitly (`ZqValue::new_string(cx, ...)?`), e.g. for
-> `set_str` / `set`.
+> `set_property_str` / `set_property`.
 
 ### `#[zq_class]` + `#[zq_class_impl]` + `#[zq_method]` + `#[zq_static_method]`
 
@@ -202,9 +220,11 @@ impl Counter {
 }
 ```
 
-Helpers generated by `#[zq_class]`: `class_def()`, `item()`,
+Helpers generated by `#[zq_class]`: `class_def()`, `item()`, `items()`,
 `register(ZqCtx)`, `new_instance(ZqCtx, payload)`, and (with payload)
-`payload(ZqCtx, val)` / `payload_mut(ZqCtx, val)`.
+`payload(ZqCtx, val)` / `payload_mut(ZqCtx, val)` / `take_payload(ZqCtx, val)`.
+`take_payload` detaches the boxed payload from the instance (release it early instead of
+waiting for GC); the instance is left without a payload afterwards.
 
 Stateless class (no payload) example:
 
@@ -234,11 +254,16 @@ dlopen), and carries optional module-load initialization.
 
 - `exports`: the module's **actual export** list. **The standard form is an inline list**
   `exports = [f1, c1, v1, ...]` (one entry each for `#[zq_function]` / `#[zq_class]` /
-  `#[zq_export]`, bare item names; the macro does the `::item()` wrapping). Advanced
-  option: reference a `const`/`static` `[ZqFieldDef; _]` array (each entry explicitly
-  `::item()`), handy for splitting the list into a separate file, composing it with
-  `#[cfg]`, or reusing it.
-- `name`: decorative module name (host identity is the dylib path, not this name).
+  `#[zq_export]`, bare item names; the macro expands each entry to its `::items()` and
+  concatenates the slices). Advanced option: reference a `const`/`static` slice
+  (`&[ZqFieldDef]` or `[ZqFieldDef; _]`, each entry explicitly `::item()`), handy for
+  splitting the list into a separate file, composing it with `#[cfg]`, or reusing it.
+- `name`: decorative module name (optional; host identity is the dylib path, not this
+  name).
+- `finalize`: optional path to a `fn(*mut ZqRuntime)` runtime-finalize hook, called once
+  per runtime that imported this module when that runtime is torn down. Use it to release
+  runtime-scoped native state (thread_locals, boxed GC-trace opaques); it must not call
+  any JS API.
 
 ```rust
 // Standard form: inline list
@@ -273,6 +298,18 @@ fn module_init() {}
 fn module_init() {}
 ```
 
+**Finalize hook**: pass `finalize = path_to_fn` to register `fn(*mut ZqRuntime)`, called
+once per runtime that imported this module when that runtime is torn down:
+
+```rust
+fn cleanup(rt: *mut zuqe_zapi::ZqRuntime) {
+    // release per-runtime native state; must not call any JS API
+}
+
+#[zq_module(name = "x", exports = [grep], finalize = cleanup)]
+fn module_init() {}
+```
+
 ### `#[derive(ZqGcTrace)]`
 
 **Purpose**: derives GC trace for payload structs. **Essence**: recursive forwarding —
@@ -292,7 +329,7 @@ the real GC nodes.
 
 ---
 
-## Complete example: `grep` extension (aike-tools)
+## Complete example: `grep` extension (aike-extensions)
 
 `Cargo.toml`:
 
@@ -301,8 +338,8 @@ the real GC nodes.
 crate-type = ["cdylib"]
 
 [dependencies]
-zuqe_zapi = "0.2"
-zuqe_zapi_macros = "0.2"
+zuqe_zapi = "0.3"
+zuqe_zapi_macros = "0.3"
 grep-matcher = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
@@ -330,8 +367,8 @@ fn grep<'a>(cx: ZqCtx<'a>, cc: ZqCallInfo<'a>) -> Result<ZqValue<'a>, ZqError> {
 #[zq_export(name = "demo_obj")]
 fn demo_obj<'a>(cx: ZqCtx<'a>) -> Result<ZqValue<'a>, ZqError> {
     let obj = ZqValue::new_object(cx)?;
-    obj.set_str(cx, "version", ZqValue::new_string(cx, "0.1.0")?)?;
-    obj.set_str(cx, "copyright", ZqValue::new_string(cx, "© 2026 aike")?)?;
+    obj.set_property_str(cx, "version", ZqValue::new_string(cx, "0.1.0")?)?;
+    obj.set_property_str(cx, "copyright", ZqValue::new_string(cx, "© 2026 aike")?)?;
     Ok(obj)
 }
 
