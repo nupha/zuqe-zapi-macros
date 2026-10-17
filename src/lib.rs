@@ -108,6 +108,16 @@ pub fn zq_module(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// optionally names the struct holding per-instance state. A class without
 /// `payload` has no native state (like `def_native_object!`'s `()` payload).
 ///
+/// `extends = Base` declares inheritance from another `#[zq_class]` type. The
+/// host chains `Child.prototype` onto `Base.prototype` and `Child` onto `Base`
+/// when it registers the class, so a child instance finds every parent member.
+/// `Base` must be a `#[zq_class]` type in scope; both sides get the link at
+/// registration time, so declaration order in the module does not matter.
+///
+/// Note this is *member lookup* inheritance, not `super`: a `#[zq_method]` body
+/// is Rust and has no `super` syntax, so a child that needs the parent's
+/// behaviour calls `Base::the_method(ctx, cc)` explicitly.
+///
 /// `gc_trace` is wired whenever `payload` is present (fool-proof: forgetting a
 /// needed trace is a use-after-free). Pass `payload_no_gc` to opt out when the
 /// payload is known to hold no GC nodes — the per-instance trace call is then
@@ -265,6 +275,23 @@ fn expand_function(
         }
     });
 
+    // The same names as data, for `zapi-dts`. The doc comment is the body's own
+    // and applies to every stacked name.
+    let doc = match class::doc_string(&body.attrs) {
+        Some(d) => quote! { Some(#d) },
+        None => quote! { None },
+    };
+    let member_metas = names.iter().map(|(n, _)| {
+        quote! {
+            ::zuqe_zapi::ZqMemberMeta {
+                name: #n,
+                kind: ::zuqe_zapi::ZqMemberKind::Function,
+                arity: 0,
+                doc: #doc,
+            }
+        }
+    });
+
     Ok(quote! {
         // The body is renamed to `__zq_impl_<fn_name>`, so a CamelCase
         // `fn_name` (which the marker type below effectively requires) would
@@ -322,6 +349,11 @@ fn expand_function(
             #vis const fn items() -> &'static [::zuqe_zapi::ffi::ZqFieldDef] {
                 &#fields_const
             }
+
+            /// The JS names this body answers to, for `zapi-dts` and name
+            /// reconciliation.
+            #vis const MEMBERS: &'static [::zuqe_zapi::ZqMemberMeta] =
+                &[#(#member_metas,)*];
         }
     })
 }
@@ -348,6 +380,10 @@ fn expand_export(
     let impl_fn = format_ident!("__zq_impl_{}", fn_name);
     let value_fn = format_ident!("__zq_value_{}", fn_name);
     let fields_const = format_ident!("__ZQ_FIELDS_{}", fn_name);
+    let doc = match class::doc_string(&func.attrs) {
+        Some(d) => quote! { Some(#d) },
+        None => quote! { None },
+    };
     let mut body = func;
     body.sig.ident = impl_fn.clone();
     body.vis = syn::Visibility::Inherited;
@@ -402,6 +438,16 @@ fn expand_export(
             pub const fn items() -> &'static [::zuqe_zapi::ffi::ZqFieldDef] {
                 &#fields_const
             }
+
+            /// The JS name this value publishes, for `zapi-dts` and name
+            /// reconciliation.
+            pub const MEMBERS: &'static [::zuqe_zapi::ZqMemberMeta] =
+                &[::zuqe_zapi::ZqMemberMeta {
+                    name: #js_name,
+                    kind: ::zuqe_zapi::ZqMemberKind::Value,
+                    arity: 0,
+                    doc: #doc,
+                }];
         }
     })
 }

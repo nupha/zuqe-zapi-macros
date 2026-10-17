@@ -4,14 +4,43 @@
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Error, Expr, ExprLit, ImplItemFn, ItemImpl, ItemStruct, Lit, LitByteStr, Meta, Path, Token,
-    Type, punctuated::Punctuated,
+    Attribute, Error, Expr, ExprLit, ImplItemFn, ItemImpl, ItemStruct, Lit, LitByteStr, Meta, Path,
+    Token, Type, punctuated::Punctuated,
 };
+
+/// A `///` doc comment as the string a `ZqMemberMeta` carries, or `None`.
+///
+/// Lines are joined with `\n` so a multi-line doc reads back the way it was
+/// written.
+pub(crate) fn doc_string(attrs: &[Attribute]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        if let Meta::NameValue(nv) = &attr.meta
+            && let Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) = &nv.value
+        {
+            lines.push(s.value());
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
 
 pub(super) struct ClassArgs {
     name: Option<String>,
     pub(super) payload: Option<Path>,
     pub(super) payload_no_gc: bool,
+    /// The parent class, spelled as a `#[zq_class]` type: `extends = Base`.
+    pub(super) extends: Option<Path>,
+    /// A `&'static [ZqMemberDef]` whose members join the prototype.
+    pub(super) prototype_members: Option<Path>,
 }
 
 fn parse_class_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ClassArgs> {
@@ -19,6 +48,8 @@ fn parse_class_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ClassArgs
         name: None,
         payload: None,
         payload_no_gc: false,
+        extends: None,
+        prototype_members: None,
     };
     for meta in args {
         match meta {
@@ -43,13 +74,32 @@ fn parse_class_args(args: &Punctuated<Meta, Token![,]>) -> syn::Result<ClassArgs
                 };
                 out.payload = Some(p.path.clone());
             }
+            Meta::NameValue(nv) if nv.path.is_ident("extends") => {
+                let Expr::Path(p) = &nv.value else {
+                    return Err(Error::new_spanned(
+                        &nv.value,
+                        "`extends` must be a type path naming another `#[zq_class]`",
+                    ));
+                };
+                out.extends = Some(p.path.clone());
+            }
+            Meta::NameValue(nv) if nv.path.is_ident("prototype_members") => {
+                let Expr::Path(p) = &nv.value else {
+                    return Err(Error::new_spanned(
+                        &nv.value,
+                        "`prototype_members` must be a path to a \
+                         `&'static [ZqMemberDef]` const",
+                    ));
+                };
+                out.prototype_members = Some(p.path.clone());
+            }
             Meta::Path(p) if p.is_ident("payload_no_gc") => {
                 out.payload_no_gc = true;
             }
             other => {
                 return Err(Error::new_spanned(
                     other,
-                    "expected `name`, `payload` or `payload_no_gc`",
+                    "expected `name`, `payload`, `payload_no_gc`, `extends` or `prototype_members`",
                 ));
             }
         }
@@ -67,6 +117,21 @@ pub(super) fn expand_class(
 
     let trace_enabled = parsed.payload.is_some() && !parsed.payload_no_gc;
 
+    // `extends = Base` fills the FFI's existing `parent_class` link with a
+    // pointer to `Base`'s class def. Both defs are `static`s in this dylib, so
+    // the pointer stays valid for the process lifetime, exactly like `name`.
+    let parent_class = match &parsed.extends {
+        Some(base) => {
+            quote! { #base::class_def() as *const ::zuqe_zapi::ffi::ZqClassDef }
+        }
+        None => quote! { ::core::ptr::null() },
+    };
+
+    let class_doc = match doc_string(&st.attrs) {
+        Some(d) => quote! { Some(#d) },
+        None => quote! { None },
+    };
+
     let mut name_bytes = name.as_bytes().to_vec();
     name_bytes.push(0);
     let name_lit = LitByteStr::new(&name_bytes, Span::call_site());
@@ -78,6 +143,28 @@ pub(super) fn expand_class(
     let ctor_sym = format_ident!("__ZQ_CTOR_{}", ty);
     let proto_entries_sym = format_ident!("__ZQ_PROTO_ENTRIES_{}", ty);
     let static_entries_sym = format_ident!("__ZQ_STATIC_ENTRIES_{}", ty);
+
+    // The `#[zq_method]` entries, then whatever `prototype_members` supplied.
+    // Both halves live in separate statics because `#[zq_class]` (which sees
+    // the table) and `#[zq_class_impl]` (which sees the methods) are separate
+    // attribute expansions that only meet at the entry array.
+    let extra_sym = format_ident!("__ZQ_PROTO_MEMBER_FIELDS_{}", ty);
+    let extra_item = match &parsed.prototype_members {
+        Some(table) => quote! {
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            static #extra_sym: [::zuqe_zapi::ffi::ZqFieldDef; #table.len()] =
+                ::zuqe_zapi::member::member_fields(&#table);
+        },
+        None => quote! {
+            #[doc(hidden)]
+            #[allow(non_upper_case_globals)]
+            static #extra_sym: [::zuqe_zapi::ffi::ZqFieldDef; 0] =
+                ::zuqe_zapi::member::member_fields(
+                    &[] as &[::zuqe_zapi::ffi::ZqMemberDef],
+                );
+        },
+    };
 
     let (finalize_body, gc_trace_body, new_instance, accessors) = match &parsed.payload {
         Some(payload) => {
@@ -214,11 +301,13 @@ pub(super) fn expand_class(
 
         #trace_fn_item
 
+        #extra_item
+
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
         static #class_def: ::zuqe_zapi::ffi::ZqClassDef = ::zuqe_zapi::ffi::ZqClassDef {
             name: #name_lit.as_ptr() as *const ::core::ffi::c_char,
-            parent_class: ::core::ptr::null(),
+            parent_class: #parent_class,
             finalize: Some(#finalize),
             gc_trace: #gc_trace_field,
             call: #ctor_sym,
@@ -243,6 +332,16 @@ pub(super) fn expand_class(
         ];
 
         impl #ty {
+            /// This class as one published member: its JS name and the doc
+            /// comment on the struct. `#[zq_class_impl]` builds `MEMBERS` on
+            /// top of this, so the name lives in exactly one place.
+            pub const CLASS_META: ::zuqe_zapi::ZqMemberMeta = ::zuqe_zapi::ZqMemberMeta {
+                name: #name,
+                kind: ::zuqe_zapi::ZqMemberKind::Class,
+                arity: 0,
+                doc: #class_doc,
+            };
+
             /// Returns the `ZqClassDef` for this class (registered by the module).
             pub const fn class_def() -> &'static ::zuqe_zapi::ffi::ZqClassDef {
                 &#class_def
@@ -261,6 +360,16 @@ pub(super) fn expand_class(
             /// Registers the class with the host.
             pub fn register(ctx: ::zuqe_zapi::ZqCtx) -> Result<(), ::zuqe_zapi::ZqError> {
                 ctx.register_class(&#class_def).map(|_| ())
+            }
+
+            /// Registers the class with the host and returns its class id, the
+            /// one [`ZqCtx::class_prototype`] takes. `register` covers the
+            /// common case; this is for an extension that has to reach the
+            /// prototype at runtime.
+            pub fn register_id(
+                ctx: ::zuqe_zapi::ZqCtx,
+            ) -> Result<i32, ::zuqe_zapi::ZqError> {
+                ctx.register_class(&#class_def)
             }
 
             #new_instance
@@ -328,6 +437,21 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
             return Err(Error::new_spanned(
                 &f.sig,
                 "class methods require signature: fn(ZqCtx, ZqCallInfo) -> Result<ZqValue, ZqError>",
+            ));
+        }
+    }
+
+    // Two entries publishing the same JS name means the later one silently
+    // replaces the earlier on the prototype. `#[zq_function]` rejects this for
+    // its own stack; do the same here.
+    for i in 0..all.len() {
+        let name = &all[i].1;
+        if let Some(j) = all[..i].iter().position(|(_, prev, ..)| prev == name) {
+            return Err(Error::new(
+                all[i].5.sig.ident.span(),
+                format!(
+                    "#[zq_class_impl] publishes the JS name `{name}` twice (entries {j} and {i}); names must be unique"
+                ),
             ));
         }
     }
@@ -408,9 +532,12 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
 
     let proto_entries_sym = format_ident!("__ZQ_PROTO_ENTRIES_{}", ty);
     let static_entries_sym = format_ident!("__ZQ_STATIC_ENTRIES_{}", ty);
+    let extra_sym = format_ident!("__ZQ_PROTO_MEMBER_FIELDS_{}", ty);
 
-    let proto_entries_item = gen_entries_array(&proto_entries_sym, &proto_entries, &ty);
+    let proto_entries_item =
+        gen_proto_entries_array(&proto_entries_sym, &extra_sym, &proto_entries, &ty);
     let static_entries_item = gen_entries_array(&static_entries_sym, &static_entries, &ty);
+    let members_item = gen_members(&ty, &proto_entries, &static_entries);
 
     Ok(quote! {
         #im
@@ -418,7 +545,69 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
         #(#method_tramp_items)*
         #proto_entries_item
         #static_entries_item
+        #members_item
     })
+}
+
+/// The class's published surface as data: the class itself, then every
+/// prototype member, then every static member.
+///
+/// Nothing reads this at runtime. It exists so `zapi-dts` — or a build step
+/// reconciling a hand-written `.d.ts` — can list names that cannot drift from
+/// the code.
+/// The class's published surface as data: the class itself, then every
+/// prototype member, then every static member.
+///
+/// Nothing reads this at runtime. It exists so `zapi-dts` — or a build step
+/// reconciling a hand-written `.d.ts` — can list names that cannot drift from
+/// the code. The class's own entry comes from `CLASS_META`, which `#[zq_class]`
+/// emits (it is the one that knows the JS name and the struct's doc comment).
+fn gen_members(
+    ty: &syn::Ident,
+    proto_entries: &[(String, bool, bool, i32, &ImplItemFn)],
+    static_entries: &[(String, bool, bool, i32, &ImplItemFn)],
+) -> proc_macro2::TokenStream {
+    let meta_items = proto_entries
+        .iter()
+        .map(|(name, get, set, _, f)| (name, *get, *set, false, *f))
+        .chain(
+            static_entries
+                .iter()
+                .map(|(name, get, set, _, f)| (name, *get, *set, true, *f)),
+        )
+        .map(|(name, get, set, is_static, f)| {
+            let kind = match (is_static, get, set) {
+                (false, false, false) => quote! { ::zuqe_zapi::ZqMemberKind::Method },
+                (false, true, false) => quote! { ::zuqe_zapi::ZqMemberKind::Getter },
+                (false, false, true) => quote! { ::zuqe_zapi::ZqMemberKind::Setter },
+                (false, true, true) => quote! { ::zuqe_zapi::ZqMemberKind::GetSet },
+                (true, false, false) => quote! { ::zuqe_zapi::ZqMemberKind::StaticMethod },
+                (true, true, false) => quote! { ::zuqe_zapi::ZqMemberKind::StaticGetter },
+                (true, false, true) => quote! { ::zuqe_zapi::ZqMemberKind::StaticSetter },
+                (true, true, true) => quote! { ::zuqe_zapi::ZqMemberKind::StaticGetSet },
+            };
+            let doc = match doc_string(&f.attrs) {
+                Some(d) => quote! { Some(#d) },
+                None => quote! { None },
+            };
+            quote! {
+                ::zuqe_zapi::ZqMemberMeta {
+                    name: #name,
+                    kind: #kind,
+                    arity: 0,
+                    doc: #doc,
+                }
+            }
+        });
+
+    quote! {
+        impl #ty {
+            /// The JS-visible surface of this class: the class itself, then its
+            /// prototype members, then its static members.
+            pub const MEMBERS: &'static [::zuqe_zapi::ZqMemberMeta] =
+                &[#ty::CLASS_META, #(#meta_items,)*];
+        }
+    }
 }
 
 fn tramp_name(ty: &syn::Ident, f: &ImplItemFn) -> proc_macro2::Ident {
@@ -463,6 +652,53 @@ fn gen_entries_array(
         static #sym: [::zuqe_zapi::ffi::ZqFieldDef; #n] = [
             #(#items),*
         ];
+    }
+}
+
+/// The prototype entries: every `#[zq_method]`, then the `prototype_members`
+/// table.
+///
+/// Order is the overwrite rule: the table is installed last, so a name it
+/// repeats replaces the `#[zq_method]` of that name.
+fn gen_proto_entries_array(
+    sym: &proc_macro2::Ident,
+    extra: &proc_macro2::Ident,
+    entries: &[(String, bool, bool, i32, &ImplItemFn)],
+    ty: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    let n = entries.len();
+    let items = entries.iter().map(|(name, get, set, magic, f)| {
+        let tramp = tramp_name(ty, f);
+        let mut b = name.as_bytes().to_vec();
+        b.push(0);
+        let name_lit = LitByteStr::new(&b, Span::call_site());
+        let name_ptr = quote! { #name_lit.as_ptr() as *const ::core::ffi::c_char };
+        if *get || *set {
+            let get_field = if *get {
+                quote! { Some(#tramp) }
+            } else {
+                quote! { None }
+            };
+            let set_field = if *set {
+                quote! { Some(#tramp) }
+            } else {
+                quote! { None }
+            };
+            quote! {
+                ::zuqe_zapi::ffi::ZqFieldDef::getset(#name_ptr, #get_field, #set_field, #magic)
+            }
+        } else {
+            quote! {
+                ::zuqe_zapi::ffi::ZqFieldDef::func(#name_ptr, #tramp, 0, #magic)
+            }
+        }
+    });
+
+    quote! {
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        static #sym: [::zuqe_zapi::ffi::ZqFieldDef; #n + #extra.len()] =
+            ::zuqe_zapi::ffi::merge_fields(&[#(#items),*], &#extra);
     }
 }
 
