@@ -4,34 +4,9 @@
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Error, Expr, ExprLit, ImplItemFn, ItemImpl, ItemStruct, Lit, LitByteStr, Meta, Path,
-    Token, Type, punctuated::Punctuated,
+    Error, Expr, ExprLit, ImplItemFn, ItemImpl, ItemStruct, Lit, LitByteStr, Meta, Path, Token,
+    Type, punctuated::Punctuated,
 };
-
-/// A `///` doc comment as the string a `ZqMemberMeta` carries, or `None`.
-///
-/// Lines are joined with `\n` so a multi-line doc reads back the way it was
-/// written.
-pub(crate) fn doc_string(attrs: &[Attribute]) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for attr in attrs {
-        if !attr.path().is_ident("doc") {
-            continue;
-        }
-        if let Meta::NameValue(nv) = &attr.meta
-            && let Expr::Lit(ExprLit {
-                lit: Lit::Str(s), ..
-            }) = &nv.value
-        {
-            lines.push(s.value());
-        }
-    }
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
-}
 
 pub(super) struct ClassArgs {
     name: Option<String>,
@@ -125,11 +100,6 @@ pub(super) fn expand_class(
             quote! { #base::class_def() as *const ::zuqe_zapi::ffi::ZqClassDef }
         }
         None => quote! { ::core::ptr::null() },
-    };
-
-    let class_doc = match doc_string(&st.attrs) {
-        Some(d) => quote! { Some(#d) },
-        None => quote! { None },
     };
 
     let mut name_bytes = name.as_bytes().to_vec();
@@ -332,16 +302,6 @@ pub(super) fn expand_class(
         ];
 
         impl #ty {
-            /// This class as one published member: its JS name and the doc
-            /// comment on the struct. `#[zq_class_impl]` builds `MEMBERS` on
-            /// top of this, so the name lives in exactly one place.
-            pub const CLASS_META: ::zuqe_zapi::ZqMemberMeta = ::zuqe_zapi::ZqMemberMeta {
-                name: #name,
-                kind: ::zuqe_zapi::ZqMemberKind::Class,
-                arity: 0,
-                doc: #class_doc,
-            };
-
             /// Returns the `ZqClassDef` for this class (registered by the module).
             pub const fn class_def() -> &'static ::zuqe_zapi::ffi::ZqClassDef {
                 &#class_def
@@ -537,79 +497,18 @@ pub(super) fn expand_class_impl(im: ItemImpl) -> syn::Result<proc_macro2::TokenS
     let proto_entries_item =
         gen_proto_entries_array(&proto_entries_sym, &extra_sym, &proto_entries, &ty);
     let static_entries_item = gen_entries_array(&static_entries_sym, &static_entries, &ty);
-    let members_item = gen_members(&ty, &proto_entries, &static_entries);
-
     Ok(quote! {
         #im
         #ctor_item
         #(#method_tramp_items)*
         #proto_entries_item
         #static_entries_item
-        #members_item
     })
 }
 
 /// The class's published surface as data: the class itself, then every
 /// prototype member, then every static member.
 ///
-/// Nothing reads this at runtime. It exists so `zapi-dts` — or a build step
-/// reconciling a hand-written `.d.ts` — can list names that cannot drift from
-/// the code.
-/// The class's published surface as data: the class itself, then every
-/// prototype member, then every static member.
-///
-/// Nothing reads this at runtime. It exists so `zapi-dts` — or a build step
-/// reconciling a hand-written `.d.ts` — can list names that cannot drift from
-/// the code. The class's own entry comes from `CLASS_META`, which `#[zq_class]`
-/// emits (it is the one that knows the JS name and the struct's doc comment).
-fn gen_members(
-    ty: &syn::Ident,
-    proto_entries: &[(String, bool, bool, i32, &ImplItemFn)],
-    static_entries: &[(String, bool, bool, i32, &ImplItemFn)],
-) -> proc_macro2::TokenStream {
-    let meta_items = proto_entries
-        .iter()
-        .map(|(name, get, set, _, f)| (name, *get, *set, false, *f))
-        .chain(
-            static_entries
-                .iter()
-                .map(|(name, get, set, _, f)| (name, *get, *set, true, *f)),
-        )
-        .map(|(name, get, set, is_static, f)| {
-            let kind = match (is_static, get, set) {
-                (false, false, false) => quote! { ::zuqe_zapi::ZqMemberKind::Method },
-                (false, true, false) => quote! { ::zuqe_zapi::ZqMemberKind::Getter },
-                (false, false, true) => quote! { ::zuqe_zapi::ZqMemberKind::Setter },
-                (false, true, true) => quote! { ::zuqe_zapi::ZqMemberKind::GetSet },
-                (true, false, false) => quote! { ::zuqe_zapi::ZqMemberKind::StaticMethod },
-                (true, true, false) => quote! { ::zuqe_zapi::ZqMemberKind::StaticGetter },
-                (true, false, true) => quote! { ::zuqe_zapi::ZqMemberKind::StaticSetter },
-                (true, true, true) => quote! { ::zuqe_zapi::ZqMemberKind::StaticGetSet },
-            };
-            let doc = match doc_string(&f.attrs) {
-                Some(d) => quote! { Some(#d) },
-                None => quote! { None },
-            };
-            quote! {
-                ::zuqe_zapi::ZqMemberMeta {
-                    name: #name,
-                    kind: #kind,
-                    arity: 0,
-                    doc: #doc,
-                }
-            }
-        });
-
-    quote! {
-        impl #ty {
-            /// The JS-visible surface of this class: the class itself, then its
-            /// prototype members, then its static members.
-            pub const MEMBERS: &'static [::zuqe_zapi::ZqMemberMeta] =
-                &[#ty::CLASS_META, #(#meta_items,)*];
-        }
-    }
-}
-
 fn tramp_name(ty: &syn::Ident, f: &ImplItemFn) -> proc_macro2::Ident {
     format_ident!("__zq_class_method_{}_{}", ty, f.sig.ident)
 }
