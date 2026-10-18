@@ -38,8 +38,8 @@ trampolines, or other FFI details.
 crate-type = ["cdylib"]
 
 [dependencies]
-zuqe_zapi = "0.3"
-zuqe_zapi_macros = "0.3"
+zuqe_zapi = "0.4"
+zuqe_zapi_macros = "0.4"
 ```
 
 ---
@@ -338,8 +338,8 @@ the real GC nodes.
 crate-type = ["cdylib"]
 
 [dependencies]
-zuqe_zapi = "0.3"
-zuqe_zapi_macros = "0.3"
+zuqe_zapi = "0.4"
+zuqe_zapi_macros = "0.4"
 grep-matcher = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"
